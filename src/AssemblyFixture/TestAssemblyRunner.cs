@@ -21,19 +21,43 @@ class TestAssemblyRunner : XunitTestAssemblyRunner
     {
     }
 
-    protected override Task BeforeTestAssemblyFinishedAsync()
+    protected override async Task AfterTestAssemblyStartingAsync()
     {
-        // Make sure we clean up everybody who is disposable, and use Aggregator.Run to isolate Dispose failures
-        foreach (var disposable in assemblyFixtureMappings.Values.OfType<IDisposable>())
-            Aggregator.Run(disposable.Dispose);
+        await base.AfterTestAssemblyStartingAsync();
 
-        return base.BeforeTestAssemblyFinishedAsync();
+        // Go find all the AssemblyFixtureAttributes adorned on the test assembly
+        Aggregator.Run(() =>
+        {
+            var fixturesAttrs = ((IReflectionAssemblyInfo)TestAssembly.Assembly).Assembly
+                .GetCustomAttributes(typeof(AssemblyFixtureAttribute), false)
+                .Cast<AssemblyFixtureAttribute>()
+                .ToList();
+
+            // Instantiate all the fixtures
+            foreach (var fixtureAttr in fixturesAttrs)
+                assemblyFixtureMappings[fixtureAttr.FixtureType] = Activator.CreateInstance(fixtureAttr.FixtureType);
+        });
+
+        // Call InitializeAsync on all instances of IAssemblyAsyncLifetime, and use Aggregator.RunAsync to isolate
+        // InitializeAsync failures
+        foreach (var disposable in assemblyFixtureMappings.Values.OfType<IAsyncLifetime>())
+            await Aggregator.RunAsync(disposable.InitializeAsync);
     }
 
+    protected override async Task BeforeTestAssemblyFinishedAsync()
+    {
+        // Call DisposeAsync on all instances of IAssemblyAsyncLifetime, and use Aggregator.RunAsync to isolate
+        // DisposeAsync failures
+        foreach (var disposable in assemblyFixtureMappings.Values.OfType<IAsyncLifetime>())
+            await Aggregator.RunAsync(disposable.DisposeAsync);
+
+        await base.BeforeTestAssemblyFinishedAsync();
+    }
 
     protected override Task<RunSummary> RunTestCollectionAsync(IMessageBus messageBus,
-                                                               ITestCollection testCollection,
-                                                               IEnumerable<IXunitTestCase> testCases,
-                                                               CancellationTokenSource cancellationTokenSource)
-        => new TestCollectionRunner(assemblyFixtureMappings, testCollection, testCases, DiagnosticMessageSink, messageBus, TestCaseOrderer, new ExceptionAggregator(Aggregator), cancellationTokenSource).RunAsync();
+        ITestCollection testCollection,
+        IEnumerable<IXunitTestCase> testCases,
+        CancellationTokenSource cancellationTokenSource)
+        => new TestCollectionRunner(assemblyFixtureMappings, testCollection, testCases, DiagnosticMessageSink,
+            messageBus, TestCaseOrderer, new ExceptionAggregator(Aggregator), cancellationTokenSource).RunAsync();
 }
